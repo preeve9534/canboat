@@ -45,9 +45,40 @@ along with CANboat.  If not, see <http://www.gnu.org/licenses/>.
  * sending all PGNs.
  */
 static unsigned char NGT_STARTUP_SEQ[] = {
-    0x11, /* msg byte 1, meaning ? */
+    0x11, /* msg byte 1, meaning reboot */
     0x02, /* msg byte 2, meaning ? */
     0x00  /* msg byte 3, meaning ? */
+};
+
+/* The following command was reverse engineered from Actisense NMEA Reader.
+ * It instructs the NGT1 to clear the PGN TX list of all user-definable
+ * entries.
+ */
+
+static unsigned char NGT_CLEAR_PGN_TX_LIST_SEQ[] = {
+    0x4D, /* msg byte, command to clear the PGN list specified by next byte */
+    0x01  /* msg byte, 00 = RX PGN list, 01 = TX PGN list, 02 = both RX & TX PGN lists */
+};
+
+/* The following command was reverse engineered from Actisense NMEA Reader.
+ * It instructs the NGT1 to enable a specified PGN in the PGN TX list.
+ */
+
+static unsigned char NGT_ENABLE_PGN_TX_SEQ[] = {
+    0x47, /* msg byte, command to enable/disable a PGN in the TX list */
+    0x00, /* msg byte, 1st byte of u32 PGN (lo byte) */
+    0x00, /* msg byte, 2nd byte of u32 PGN */
+    0x00, /* msg byte, 3rd byte of u32 PGN */
+    0x00, /* msg byte, 4th byte of u32 PGN (hi byte) */
+    0x01  /* msg byte, 00 = disable, 01 = enable */
+};
+
+/* The following command was reverse engineered from Actisense NMEA Reader.
+ * It instructs the NGT1 to save the currently configured PGN TX list to EEPROM.
+ */
+
+static unsigned char NGT_WRITE_PGN_TX_LIST_SEQ[] = {
+    0x21  /* msg byte, command to save PGN TX list to EEPROM. */
 };
 
 #define BUFFER_SIZE 900
@@ -90,6 +121,7 @@ int main(int argc, char **argv)
   int            i;
   int            wait;
   time_t         lastPing = time(0);
+  char *         txpgns = 0;
 
   setProgName(argv[0]);
   while (argc > 1)
@@ -106,6 +138,12 @@ int main(int argc, char **argv)
     else if (strcasecmp(argv[1], "-p") == 0)
     {
       passthru = 1;
+    }
+    else if (strcasecmp(argv[1], "-tx") == 0)
+    {
+      argc--;
+      argv++;
+      txpgns = argv[1];
     }
     else if (strcasecmp(argv[1], "-r") == 0)
     {
@@ -181,7 +219,7 @@ int main(int argc, char **argv)
   if (!device)
   {
     fprintf(stderr,
-            "Usage: %s [-w] -[-p] [-r] [-v] [-d] [-s <n>] [-t <n>] device\n"
+            "Usage: %s [-w] -[-p] [-r] [-v] [-d] [-s <n>] [-t <n>] [-tx pgn[,pgn...]] device\n"
             "\n"
             "Options:\n"
             "  -w      writeonly mode, no data is read from device\n"
@@ -198,13 +236,20 @@ int main(int argc, char **argv)
 #endif
             "\n"
             "  -t <n>  timeout, if no message is received after <n> seconds the program quits\n"
+            "  -tx pgn[,pgn...]\n"
+            "          <pgn> can be one of:\n"
+            "          - a valid numeric PGN which will be added to the TX list\n"
+            "          - the value 'clear' which will clear the TX list\n"
+            "          - the value 'write' which will write the current TX list to EEPROM\n"
             "  -o      output commands sent to stdin to the stdout \n"
             "  <device> can be a serial device, a normal file containing a raw log,\n"
             "  or the address of a TCP server in the format tcp://<host>[:<port>]\n"
             "\n"
             "  Examples: %s /dev/ttyUSB0\n"
             "            %s tcp://192.168.1.1:10001\n"
+            "            %s /dev/ttyS0 -tx clear,127501,127502,write\n"
             "\n" COPYRIGHT,
+            name,
             name,
             name,
             name);
@@ -262,6 +307,29 @@ int main(int argc, char **argv)
     logDebug("Device is a serial port, send the startup sequence.\n");
 
     writeMessage(handle, NGT_MSG_SEND, NGT_STARTUP_SEQ, sizeof(NGT_STARTUP_SEQ));
+
+    if (txpgns) {
+        char* token = strtok(txpgns, ",");
+        while (token) {
+            if (strcasecmp(token, "clear") == 0) {
+                logDebug("clearing TX PGN list\n");
+                writeMessage(handle, NGT_MSG_SEND, NGT_CLEAR_PGN_TX_LIST_SEQ, sizeof(NGT_CLEAR_PGN_TX_LIST_SEQ));
+            } else if (strcasecmp(token, "write") == 0) {
+                logDebug("writing PGN TX list to EEPROM\n");
+                writeMessage(handle, NGT_MSG_SEND, NGT_WRITE_PGN_TX_LIST_SEQ, sizeof(NGT_WRITE_PGN_TX_LIST_SEQ));
+            } else {
+                unsigned int pgn = abs(atoi(token));
+                if (pgn) {
+                    for (unsigned int i = 1; i < 5; i++) { NGT_ENABLE_PGN_TX_SEQ[i] = pgn & 0xFF; pgn = pgn >> 8; }
+                    logDebug("enabling TX PGN %d\n", pgn);
+                    writeMessage(handle, NGT_MSG_SEND, NGT_ENABLE_PGN_TX_SEQ, sizeof(NGT_ENABLE_PGN_TX_SEQ));
+                } else {
+                    logError("ignoring unparsable PGN '%s'\n", token);
+                }
+            }
+            token = strtok(NULL, ",");
+        }
+    }
     sleep(2);
   }
 
